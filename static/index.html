@@ -1,0 +1,232 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hand Tracking Test</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        .hud {
+            position: fixed;
+            font-family: monospace;
+            color: rgba(0, 255, 255, 0.7);
+            text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+            pointer-events: none;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .hud-top-right {
+            top: 20px;
+            right: 20px;
+            text-align: right;
+        }
+        .hud-bottom-left {
+            bottom: 20px;
+            left: 20px;
+        }
+        .hud-label {
+            color: rgba(0, 255, 255, 0.5);
+        }
+        .hud-value {
+            font-weight: bold;
+        }
+        .hud-box {
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            margin-bottom: 10px;
+        }
+        #debug {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none;
+        }
+        .circle-container {
+            filter: blur(8px);
+            transition: filter 0.3s ease;
+        }
+        .circle-container.tracking {
+            filter: blur(0);
+        }
+    </style>
+</head>
+<body style="margin: 0; overflow: hidden; background: #1a1a1a;">
+    <div id="debug">Waiting for hand tracking...</div>
+    <div class="hud hud-top-right">
+        <div class="hud-box">
+            <div>PALM CENTER</div>
+            <div>X: <span id="palm-x" class="hud-value">0.000</span></div>
+            <div>Y: <span id="palm-y" class="hud-value">0.000</span></div>
+            <div>Z: <span id="palm-z" class="hud-value">0.000</span></div>
+        </div>
+        <div class="hud-box">
+            <div>ROTATION</div>
+            <div>PITCH: <span id="rot-pitch" class="hud-value">0.000</span></div>
+            <div>YAW: <span id="rot-yaw" class="hud-value">0.000</span></div>
+        </div>
+    </div>
+    <div class="hud hud-bottom-left">
+        <div class="hud-box">
+            <div>SYSTEM STATUS</div>
+            <div>FPS: <span id="hud-fps" class="hud-value">0</span></div>
+            <div>TRACKING: <span id="hud-status" class="hud-value">INACTIVE</span></div>
+        </div>
+    </div>
+    <svg width="100%" height="100%" style="position: fixed; inset: 0;">
+        <defs>
+            <radialGradient id="circleGradient">
+                <stop offset="0%" stop-color="rgba(255, 100, 100, 0.8)"/>
+                <stop offset="100%" stop-color="rgba(255, 50, 50, 0.2)"/>
+            </radialGradient>
+        </defs>
+        <g class="circle-container">
+            <circle id="testCircle" 
+                cx="50%" 
+                cy="50%" 
+                r="100" 
+                fill="url(#circleGradient)"
+                filter="drop-shadow(0 0 10px rgba(255,0,0,0.5))"
+            />
+        </g>
+    </svg>
+    
+    <script>
+        const debug = document.getElementById('debug');
+        const container = document.querySelector('.circle-container');
+        let lastUpdate = Date.now();
+        let frameCount = 0;
+        let wsRetryCount = 0;
+        const MAX_RETRIES = 5;
+        
+        // Constants for z-mapping
+        const Z_MIN = 0.2;
+        const Z_MAX = 0.8;
+        const CIRCLE_MIN = 50;
+        const CIRCLE_MAX = 200;
+        
+        function mapRange(value, inMin, inMax, outMin, outMax) {
+            return (value - inMin) * (outMax - outMin) / (inMax - inMin) + outMin;
+        }
+        
+        function clamp(value, min, max) {
+            return Math.min(Math.max(value, min), max);
+        }
+        
+        function connectWebSocket() {
+            debug.textContent = 'Connecting to WebSocket...';
+            const ws = new WebSocket('ws://localhost:8000/ws');
+            const circle = document.getElementById('testCircle');
+            let currentX = window.innerWidth / 2;
+            let currentY = window.innerHeight / 2;
+            let currentR = 100;
+            const smoothingFactor = 0.3;
+            
+            let isConnected = false;
+            
+            ws.onopen = function() {
+                debug.textContent = 'WebSocket Connected';
+                wsRetryCount = 0;
+                isConnected = true;
+            };
+            
+            ws.onmessage = function(event) {
+                if (!isConnected) return;
+                
+                frameCount++;
+                const now = Date.now();
+                if (now - lastUpdate >= 1000) {
+                    debug.textContent = `FPS: ${frameCount} | Hand Tracking Active`;
+                    frameCount = 0;
+                    lastUpdate = now;
+                }
+                
+                const data = JSON.parse(event.data);
+                
+                // Handle status messages
+                if (data.status) {
+                    debug.textContent = data.status;
+                    return;
+                }
+                
+                // Handle error messages
+                if (data.error) {
+                    debug.textContent = `Error: ${data.error}`;
+                    return;
+                }
+                
+                if (data.palm_center) {
+                    container.classList.add('tracking');
+                    const [x, y, z] = data.palm_center;
+                    
+                    // Update HUD values
+                    document.getElementById('palm-x').textContent = x.toFixed(3);
+                    document.getElementById('palm-y').textContent = y.toFixed(3);
+                    document.getElementById('palm-z').textContent = z.toFixed(3);
+                    document.getElementById('rot-pitch').textContent = data.rotation.pitch.toFixed(3);
+                    document.getElementById('rot-yaw').textContent = data.rotation.yaw.toFixed(3);
+                    document.getElementById('hud-status').textContent = 'ACTIVE';
+                    document.getElementById('hud-fps').textContent = frameCount.toString();
+                    
+                    // Smooth position updates
+                    const targetX = x * window.innerWidth;
+                    const targetY = y * window.innerHeight;
+                    currentX = currentX + (targetX - currentX) * smoothingFactor;
+                    currentY = currentY + (targetY - currentY) * smoothingFactor;
+                    
+                    // Map z to radius with limits
+                    const targetR = mapRange(
+                        clamp(z, Z_MIN, Z_MAX),
+                        Z_MAX, Z_MIN,  // Invert z range for intuitive scaling
+                        CIRCLE_MIN, CIRCLE_MAX
+                    );
+                    currentR = currentR + (targetR - currentR) * smoothingFactor;
+                    
+                    circle.setAttribute('cx', currentX);
+                    circle.setAttribute('cy', currentY);
+                    circle.setAttribute('r', currentR);
+                } else {
+                    container.classList.remove('tracking');
+                    debug.textContent = 'No hand detected';
+                }
+            };
+            
+            ws.onclose = function() {
+                isConnected = false;
+                wsRetryCount++;
+                if (wsRetryCount < MAX_RETRIES) {
+                    debug.textContent = `WebSocket closed, attempt ${wsRetryCount}/${MAX_RETRIES} to reconnect...`;
+                    setTimeout(connectWebSocket, 1000);
+                } else {
+                    debug.textContent = 'WebSocket connection failed after multiple attempts';
+                }
+                container.classList.remove('tracking');
+            };
+            
+            ws.onerror = function(err) {
+                debug.textContent = `WebSocket error: ${err.message || 'Unknown error'}`;
+                container.classList.remove('tracking');
+                ws.close();
+            };
+        }
+        
+        connectWebSocket();
+        
+        window.onfocus = function() {
+            if (wsRetryCount >= MAX_RETRIES) {
+                wsRetryCount = 0;
+                connectWebSocket();
+            }
+        };
+    </script>
+</body>
+</html>
