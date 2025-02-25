@@ -9,6 +9,7 @@ Real-time hand tracking over WebSockets using MediaPipe, OpenCV, and FastAPI. Tr
 - Smooth motion interpolation
 - Cyberpunk-style HUD overlay
 - ~30 FPS performance on modern hardware
+- Support for webcam or video file input
 
 ## Requirements
 
@@ -29,8 +30,11 @@ conda activate handtrack
 conda install -c conda-forge mediapipe opencv numpy
 pip install fastapi uvicorn
 
-# Run the tracker
+# Run with webcam
 python main.py
+
+# Run with video file
+python main.py --movie path/to/movie.mov
 ```
 
 Visit `http://localhost:8000` to see the visualization.
@@ -49,3 +53,5 @@ BSD 3-Clause. Use it. Hack it. Share it.
 
 ---
 *"The hand is the visible part of the brain." - Immanuel Kant*
+
+> Note: Video files will automatically loop when they reach the end

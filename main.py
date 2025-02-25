@@ -10,20 +10,26 @@ import asyncio
 from collections import deque
 import math
 import logging
+import argparse
 from fastapi.responses import FileResponse
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Initialize MediaPipe Hand tracking
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 hands = mp_hands.Hands(
     static_image_mode=False,
-    max_num_hands=1,
+    max_num_hands=2,
     min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_tracking_confidence=0.5,
+    model_complexity=1
 )
 
 # Create FastAPI app
@@ -54,23 +60,8 @@ def smooth_positions(new_pos):
         smoothed = alpha * np.array(pos) + (1 - alpha) * smoothed
     return smoothed.tolist()
 
-def process_frame(frame):
+def process_frame(hand_landmarks):
     """Process a single frame and return hand tracking data."""
-    # Convert BGR to RGB
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
-    # Get frame dimensions
-    height, width, _ = frame.shape
-    
-    # Process frame with MediaPipe
-    results = hands.process(frame_rgb)
-    
-    if not results.multi_hand_landmarks:
-        return None
-    
-    # Get first hand only
-    hand_landmarks = results.multi_hand_landmarks[0]
-    
     # Extract raw landmarks
     raw_landmarks = []
     for landmark in hand_landmarks.landmark:
@@ -369,42 +360,127 @@ camera = None
 frame_processor = None
 
 class FrameProcessor:
-    def __init__(self):
-        self.cap = cv2.VideoCapture(0)
+    def __init__(self, source=0):
+        """Initialize with camera index or video path."""
+        self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
             raise RuntimeError("Failed to open camera!")
         
-        logger.info("Camera opened successfully!")
+        # Get video properties
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        self.height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        
+        # Set video properties for better processing
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        if isinstance(source, str):  # If video file
+            logger.info(f"Loaded video file: {source}")
+            logger.info(f"Video FPS: {self.fps}")
+            logger.info(f"Video dimensions: {self.width}x{self.height}")
+        else:
+            logger.info("Camera opened successfully!")
+        
+        # For video files, loop playback
+        self.is_video = isinstance(source, str)
         
     def process_next_frame(self):
         success, frame = self.cap.read()
         if not success:
-            return None, None
-            
+            if self.is_video:  # Loop video
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                success, frame = self.cap.read()
+                if not success:
+                    return None, None
+            else:
+                return None, None
+        
+        # Preprocess frame for better detection
+        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.flip(frame, 1)
+        
+        # Convert to HSV to handle the red glove
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Create mask for red/orange colors
+        lower_red = np.array([0, 50, 50])
+        upper_red = np.array([30, 255, 255])
+        mask1 = cv2.inRange(hsv, lower_red, upper_red)
+        
+        # Handle wrap-around hue values for red
+        lower_red = np.array([150, 50, 50])
+        upper_red = np.array([180, 255, 255])
+        mask2 = cv2.inRange(hsv, lower_red, upper_red)
+        
+        # Combine masks and dilate to get full glove
+        mask = mask1 + mask2
+        kernel = np.ones((5,5), np.uint8)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        # Apply mask to original image
+        glove_region = cv2.bitwise_and(frame, frame, mask=mask)
+        
+        # Enhance contrast in non-glove regions
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        enhanced = cv2.merge((cl,a,b))
+        frame = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        
+        # Combine enhanced frame with glove region
+        frame = cv2.addWeighted(frame, 0.7, glove_region, 0.3, 0)
+        
+        # Convert to RGB for MediaPipe
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = cv2.GaussianBlur(frame_rgb, (3,3), 0)  # Lighter blur
+        
         results = hands.process(frame_rgb)
         tracking_data = None
         
         if results.multi_hand_landmarks:
-            # Draw landmarks
+            logger.info(f"Detected {len(results.multi_hand_landmarks)} hands")
+            # Draw landmarks first
             for hand_landmarks in results.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(
                     frame,
                     hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS
+                    mp_hands.HAND_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing_styles.get_default_hand_landmarks_style(),
+                    connection_drawing_spec=mp_drawing_styles.get_default_hand_connections_style()
                 )
-            tracking_data = process_frame(frame)
+            # Process tracking data with the first hand
+            tracking_data = process_frame(results.multi_hand_landmarks[0])
+        else:
+            logger.debug("No hands detected")
         
         # Add status text
         cv2.putText(
             frame,
-            "Camera Active - Press 'Q' to quit",
+            "Video Playing - Press 'Q' to quit" if self.is_video else "Camera Active - Press 'Q' to quit",
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
             (0, 255, 0),
             2
         )
+        
+        # Add debug info
+        if tracking_data:
+            cv2.putText(
+                frame,
+                "Hand Detected!",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2
+            )
+            # Draw palm center
+            palm_x = int(tracking_data['palm_center'][0] * self.width)
+            palm_y = int(tracking_data['palm_center'][1] * self.height)
+            cv2.circle(frame, (palm_x, palm_y), 10, (0, 255, 0), -1)
         
         return frame, tracking_data
         
@@ -443,10 +519,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     await asyncio.sleep(0.1)
                     continue
                     
-                _, tracking_data = frame_processor.process_next_frame()
+                frame, tracking_data = frame_processor.process_next_frame()
                 
                 if tracking_data:
-                    await websocket.send_json(tracking_data)
+                    try:
+                        await websocket.send_json(tracking_data)
+                        logger.debug("Sent tracking data")
+                    except Exception as e:
+                        logger.error(f"Failed to send tracking data: {e}")
+                        break
+                else:
+                    logger.debug("No hand detected in frame")
                 
                 await asyncio.sleep(1/30)
                 
@@ -466,14 +549,19 @@ async def root():
     return FileResponse(static_dir / "index.html")
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Hand tracking with webcam or video file')
+    parser.add_argument('--movie', type=str, help='Path to video file')
+    args = parser.parse_args()
+    
     # Initialize camera access before starting server
     logger.info("Testing camera access...")
     try:
-        frame_processor = FrameProcessor()
+        source = args.movie if args.movie else 0
+        frame_processor = FrameProcessor(source)
     except Exception as e:
         logger.error(f"Failed to initialize camera: {e}")
         exit(1)
-    logger.info("Camera access confirmed")
     
     # Create and get event loop
     loop = asyncio.new_event_loop()
